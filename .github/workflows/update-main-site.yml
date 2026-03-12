@@ -1,0 +1,90 @@
+name: Notify main site of submodule update
+
+# Trigger on every push to main so the portfolio site (angelorscoelho.dev)
+# immediately reflects any change made to this sub-project.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-submodule:
+    name: Update blip submodule pointer in angelorscoelho.dev
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # 1. Check out the main portfolio site using a PAT that has write access.
+      #    The PAT is stored as the secret MAIN_SITE_PAT in this repository's
+      #    Settings → Secrets and variables → Actions.
+      - name: Checkout angelorscoelho.dev
+        uses: actions/checkout@v4
+        with:
+          repository: angelorscoelho/angelorscoelho.dev
+          token: ${{ secrets.MAIN_SITE_PAT }}
+          submodules: false
+          path: main-site
+
+      # 2. Register the blip submodule in .gitmodules (idempotent — only
+      #    writes the entry when it is not already present).
+      - name: Register blip submodule (first time only)
+        working-directory: main-site
+        run: |
+          BLIP_URL="https://github.com/angelorscoelho/high-load-ingestion-poc.git"
+          if ! grep -q '\[submodule "blip"\]' .gitmodules 2>/dev/null; then
+            git config --file .gitmodules submodule.blip.path blip
+            git config --file .gitmodules submodule.blip.url "$BLIP_URL"
+          fi
+
+      # 3. Point the blip submodule at the exact commit that just landed on
+      #    main. git update-index records the new SHA in the parent repo's
+      #    index, which is what tells Vercel (and any downstream CI) that the
+      #    sub-project changed and a new build is required.
+      - name: Advance blip submodule pointer
+        working-directory: main-site
+        run: |
+          BLIP_SHA="${{ github.sha }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git update-index --cacheinfo "160000,$BLIP_SHA,blip"
+
+      # 4. Add the /blip route to vercel.json if it is not already present,
+      #    inserting it before the catch-all rewrite so requests to
+      #    angelorscoelho.dev/blip/* are served by the blip sub-app.
+      - name: Add /blip route to vercel.json (first time only)
+        working-directory: main-site
+        run: |
+          if ! grep -q '"blip"' vercel.json 2>/dev/null; then
+            node -e "
+              const fs = require('fs');
+              const cfg = JSON.parse(fs.readFileSync('vercel.json', 'utf8'));
+              const blipRewrite = { source: '/blip/(.*)', destination: '/blip/index.html' };
+              const catchAllIdx = cfg.rewrites.findIndex(r => r.source === '/(.*)');
+              if (catchAllIdx === -1) {
+                cfg.rewrites.push(blipRewrite);
+              } else {
+                cfg.rewrites.splice(catchAllIdx, 0, blipRewrite);
+              }
+              fs.writeFileSync('vercel.json', JSON.stringify(cfg, null, 2) + '\n');
+            "
+          fi
+
+      # 5. Commit and push if anything changed.
+      - name: Commit and push changes
+        working-directory: main-site
+        run: |
+          BLIP_SHA="${{ github.sha }}"
+          SHORT="${BLIP_SHA:0:8}"
+
+          git add .
+
+          if git diff --staged --quiet; then
+            echo "Nothing changed — nothing to push."
+          else
+            git commit -m "ci: update blip submodule to ${SHORT}"
+            git push origin HEAD:main
+            echo "Pushed changes — Vercel will rebuild."
+          fi

@@ -3,7 +3,7 @@ import PocDashboard from './components/PocDashboard';
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/blip">
       <Routes>
         <Route path="/poc/:companyId" element={<PocDashboard />} />
         <Route path="/" element={<Navigate to="/poc/default" replace />} />
